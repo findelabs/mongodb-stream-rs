@@ -85,13 +85,13 @@ async fn main() -> BoxResult<()> {
     );
 
     // Create connections to source and destination db's
-    let source_db = DB::init(&source, &db).await?;
-    let destination_db = DB::init(&destination, &db).await?;
+    let mut source_db = DB::init(&source, &db).await?;
+    let mut destination_db = DB::init(&destination, &db).await?;
 
     // Acquire cursor from source
-    let (source_cursor, source_count) = source_db.find(collection, doc!{}).await?;
+    let (source_cursor,total) = source_db.find(collection, doc!{}).await?;
 
-    destination_db.insert_cursor(collection, source_cursor, source_count).await?;
+    destination_db.insert_cursor(collection, source_cursor, total).await?;
 
     Ok(())
 }
