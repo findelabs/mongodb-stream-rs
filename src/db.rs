@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use chrono::offset::Utc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use mongodb::bson::{doc, document::Document};
 //use mongodb::{options::ClientOptions, options::FindOptions, Client, Collection};
 use mongodb::{options::ClientOptions, options::FindOptions, options::InsertManyOptions, Client, Cursor};
@@ -103,17 +103,24 @@ impl DB {
 
         // Create vector of documents to bulk upload
 //        let mut bulk = Bulk::new(bulk_count);
-        let mut bulk: Vec<Document> = Vec::with_capacity(bulk_count);
-
+        let mut bulk = Vec::with_capacity(bulk_count);
         // Get timestamp
         let start = Utc::now().timestamp();
         
+        // Set counter
+        let mut counter: usize = 0;
+
         while let Some(doc) = cursor.next().await {
             match doc {
                 Ok(d) => {
+                    // Push to vec, incr counter, and print debug log
                     bulk.push(d);
-                    if bulk.len() >= bulk.capacity() {
-                        match coll.insert_many(*bulk, insert_many_options.clone()).await {
+                    counter += 1;
+                    log::debug!("inserted doc: {}/{}", counter, bulk_count);
+
+                    // If counter is greater or equal to bulk_count
+                    if counter >= bulk_count {
+                        match coll.insert_many(bulk.clone(), insert_many_options.clone()).await {
                             Ok(_) => {
                                 log::debug!("Bulk inserted {} docs", bulk_count);
                             }
@@ -121,34 +128,36 @@ impl DB {
                                 log::debug!("Got error with insertMany: {}", e);
                             }
                         }
+                        counter = 0;
                         bulk.clear();
                         self.counter.incr(&self.db, collection, bulk_count as f64, start);
                     } else {
                         continue
                     }
-//                    if bulk.push(d).await {
-//                        log::debug!("Bulk inserting {} docs", bulk_count);
-//                        let values = bulk.get().await;
-//                        match coll.insert_many(values, insert_many_options.clone()).await {
-//                            Ok(_) => {
-//                                log::debug!("Bulk inserted {} docs", bulk_count);
+//                    match bulk.push(d) {
+//                        Some(values) => {
+//                            log::debug!("Bulk inserting {} docs", bulk_count);
+//                            match coll.insert_many(values, insert_many_options.clone()).await {
+//                                Ok(_) => {
+//                                    log::debug!("Bulk inserted {} docs", bulk_count);
+//                                }
+//                                Err(e) => {
+//                                    log::debug!("Got error with insertMany: {}", e);
+//                                }
 //                            }
-//                            Err(e) => {
-//                                log::debug!("Got error with insertMany: {}", e);
-//                            }
+//                            self.counter.incr(&self.db, collection, bulk_count as f64, start);
 //                        }
-//                        bulk.clear().await;
-//                        self.counter.incr(&self.db, collection, bulk_count as f64, start);
-//                    } else {
-//                        log::debug!("inserted doc: {}/{}", bulk.len().await, bulk_count);
-//                        continue
+//                        None => {
+//                            log::debug!("inserted doc: {}/{}", bulk.len(), bulk_count);
+//                            continue
+//                        }
 //                    }
                 }
                 Err(e) => {
                     log::error!("Caught error getting next doc, skipping: {}", e);
                     continue;
                 }
-            };
+            }
         }
         log::info!("Completed {}.{}", self.db, collection);
         Ok(())
@@ -245,29 +254,21 @@ impl Bulk {
         }
     }
 
-    pub async fn push(&mut self, doc: Document) -> bool {
-        let mut me = self.inner.lock().await;
+    pub fn push(&mut self, doc: Document) -> Option<Vec<Document>> {
+        let mut me = self.inner.lock().expect("failed locking mutex");
         me.push(doc);
 
         if me.len() >= me.capacity() {
-            return true
+            let values = me.to_vec();
+            me.clear();
+            return Some(values)
         } else {
-            return false
+            return None
         }
     }
 
-    pub async fn len(&self) -> usize {
-        let me = self.inner.lock().await;
+    pub fn len(&self) -> usize {
+        let me = self.inner.lock().expect("failed locking mutex");
         me.len()
-    }
-
-    pub async fn get(&self) -> Vec<Document> {
-        let me = self.inner.lock().await;
-        me.to_vec()
-    }
-
-    pub async fn clear(&self) {
-        let mut me = self.inner.lock().await;
-        me.clear()
     }
 }
