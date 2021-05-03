@@ -55,6 +55,16 @@ async fn main() -> BoxResult<()> {
                 .help("MongoDB Collection")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("bulk")
+                .short("b")
+                .long("bulk")
+                .required(false)
+                .value_name("STREAM_BULK")
+                .env("STREAM_BULK")
+                .help("Bulk stream documents")
+                .takes_value(true)
+        )
         .get_matches();
 
     // Initialize log Builder
@@ -69,7 +79,7 @@ async fn main() -> BoxResult<()> {
             )
         })
         .target(Target::Stdout)
-        .filter_level(LevelFilter::Error)
+        .filter_level(LevelFilter::Info)
         .parse_default_env()
         .init();
 
@@ -78,6 +88,10 @@ async fn main() -> BoxResult<()> {
     let destination= &opts.value_of("destination_uri").unwrap();
     let collection = &opts.value_of("collection").unwrap();
     let db = &opts.value_of("db").unwrap();
+    let bulk = match opts.is_present("bulk") {
+        true => Some(opts.value_of("bulk").unwrap().parse::<u32>()?),
+        false => None
+    };
 
     println!(
         "Starting mongodb-stream-rs:{}", 
@@ -88,10 +102,22 @@ async fn main() -> BoxResult<()> {
     let mut source_db = DB::init(&source, &db).await?;
     let mut destination_db = DB::init(&destination, &db).await?;
 
-    // Acquire cursor from source
-    let (source_cursor,total) = source_db.find(collection, doc!{}).await?;
+    // If bulk flag is set, use insertMany
+    match bulk {
+        Some(bulk_size) => {
+            // Acquire cursor from source
+            let (source_cursor,total) = source_db.find(collection, doc!{}, Some(bulk_size as u64)).await?;
 
-    destination_db.insert_cursor(collection, source_cursor, total).await?;
+            destination_db.bulk_insert_cursor(collection, source_cursor, total, bulk_size as usize).await?;
+        }
+        None => {
+            // Acquire cursor from source
+            let (source_cursor,total) = source_db.find(collection, doc!{}, None).await?;
+
+            destination_db.insert_cursor(collection, source_cursor, total).await?
+        }
+
+    };
 
     Ok(())
 }
