@@ -1,6 +1,4 @@
-use std::sync::Arc;
 use chrono::offset::Utc;
-use std::sync::Mutex;
 use mongodb::bson::{doc, document::Document};
 //use mongodb::{options::ClientOptions, options::FindOptions, Client, Collection};
 use mongodb::{options::ClientOptions, options::FindOptions, options::InsertManyOptions, Client, Cursor};
@@ -8,6 +6,7 @@ use mongodb::{options::ClientOptions, options::FindOptions, options::InsertManyO
 use futures::StreamExt;
 //use clap::ArgMatches;
 use std::error;
+use std::mem;
 
 
 #[derive(Clone, Debug)]
@@ -36,9 +35,9 @@ impl DB {
 
         let batch_size = match bulk_size {
             Some(bulk_size) => {
-                if bulk_size > 64000 {
-                    log::info!("Setting mongo cursor batch_size to 64000");
-                    Some(64000u32)
+                if bulk_size > 6400 {
+                    log::info!("Setting mongo cursor batch_size to 6400");
+                    Some(6400u32)
                 } else {
                     Some(bulk_size as u32)
                 }
@@ -102,13 +101,15 @@ impl DB {
             .build();
 
         // Create vector of documents to bulk upload
-//        let mut bulk = Bulk::new(bulk_count);
-        let mut bulk = Vec::with_capacity(bulk_count);
+        let mut bulk: Vec<Document> = Vec::with_capacity(bulk_count);
+
         // Get timestamp
         let start = Utc::now().timestamp();
         
         // Set counter
         let mut counter: usize = 0;
+
+        // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
 
         while let Some(doc) = cursor.next().await {
             match doc {
@@ -120,7 +121,12 @@ impl DB {
 
                     // If counter is greater or equal to bulk_count
                     if counter >= bulk_count {
-                        match coll.insert_many(bulk.clone(), insert_many_options.clone()).await {
+
+                        // Create a new empty vec, then swap, to avoid clone()
+                        let mut tmp_bulk: Vec<Document> = Vec::with_capacity(bulk_count);
+                        mem::swap(&mut bulk, &mut tmp_bulk);
+
+                        match coll.insert_many(tmp_bulk, insert_many_options.clone()).await {
                             Ok(_) => {
                                 log::debug!("Bulk inserted {} docs", bulk_count);
                             }
@@ -134,24 +140,6 @@ impl DB {
                     } else {
                         continue
                     }
-//                    match bulk.push(d) {
-//                        Some(values) => {
-//                            log::debug!("Bulk inserting {} docs", bulk_count);
-//                            match coll.insert_many(values, insert_many_options.clone()).await {
-//                                Ok(_) => {
-//                                    log::debug!("Bulk inserted {} docs", bulk_count);
-//                                }
-//                                Err(e) => {
-//                                    log::debug!("Got error with insertMany: {}", e);
-//                                }
-//                            }
-//                            self.counter.incr(&self.db, collection, bulk_count as f64, start);
-//                        }
-//                        None => {
-//                            log::debug!("inserted doc: {}/{}", bulk.len(), bulk_count);
-//                            continue
-//                        }
-//                    }
                 }
                 Err(e) => {
                     log::error!("Caught error getting next doc, skipping: {}", e);
@@ -239,36 +227,5 @@ impl Counter {
             log::info!("{}.{}: {:.2}%, {:.2}/s, {}/{}", db, collection, percent, rate, self.count, self.total);
             self.marker += 1f64;
         };
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Bulk {
-    pub inner: Arc<Mutex<Vec<Document>>>
-}
-
-impl Bulk {
-    pub fn new(size: usize) -> Bulk {
-        Bulk { 
-            inner: Arc::new(Mutex::new(Vec::with_capacity(size))) 
-        }
-    }
-
-    pub fn push(&mut self, doc: Document) -> Option<Vec<Document>> {
-        let mut me = self.inner.lock().expect("failed locking mutex");
-        me.push(doc);
-
-        if me.len() >= me.capacity() {
-            let values = me.to_vec();
-            me.clear();
-            return Some(values)
-        } else {
-            return None
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        let me = self.inner.lock().expect("failed locking mutex");
-        me.len()
     }
 }
