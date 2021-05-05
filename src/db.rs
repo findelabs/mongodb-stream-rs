@@ -7,6 +7,8 @@ use futures::StreamExt;
 //use clap::ArgMatches;
 use std::error;
 use std::mem;
+use tokio::runtime::Builder;
+use tokio::task;
 
 
 #[derive(Clone, Debug)]
@@ -109,8 +111,20 @@ impl DB {
         // Set counter
         let mut counter: usize = 0;
 
-        // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
+        // Create tokio runtime
+//        let runtime = Builder::new_multi_thread()
+//            .max_blocking_threads(4usize)
+//            .on_thread_start(|| {
+//                println!("thread started");
+//            })
+//            .on_thread_stop(|| {
+//                println!("thread stopping");
+//            })
+//            .build()
+//            .unwrap();
 
+
+        // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
         while let Some(doc) = cursor.next().await {
             match doc {
                 Ok(d) => {
@@ -125,8 +139,14 @@ impl DB {
                         // Create a new empty vec, then swap, to avoid clone()
                         let mut tmp_bulk: Vec<Document> = Vec::with_capacity(bulk_count);
                         mem::swap(&mut bulk, &mut tmp_bulk);
+                    
+                        // Get clones for the threads
+                        let coll_clone = coll.clone();
+                        let options = insert_many_options.clone();
 
-                        match coll.insert_many(tmp_bulk, insert_many_options.clone()).await {
+                        task::spawn(async move {
+
+                        match coll_clone.insert_many(tmp_bulk, options.clone()).await {
                             Ok(_) => {
                                 log::debug!("Bulk inserted {} docs", bulk_count);
                             }
@@ -134,8 +154,8 @@ impl DB {
                                 log::debug!("Got error with insertMany: {}", e);
                             }
                         }
+                        });
                         counter = 0;
-                        bulk.clear();
                         self.counter.incr(&self.db, collection, bulk_count as f64, start);
                     } else {
                         continue

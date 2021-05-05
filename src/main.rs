@@ -11,7 +11,7 @@ mod db;
 
 type BoxResult<T> = std::result::Result<T, Box<dyn error::Error + Send + Sync>>;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> BoxResult<()> {
     let opts = App::new("mongodb-stream-rs")
         .version(crate_version!())
