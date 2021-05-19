@@ -7,8 +7,9 @@ use futures::StreamExt;
 //use clap::ArgMatches;
 use std::error;
 use std::mem;
-use tokio::runtime::Builder;
+//use tokio::runtime::Builder;
 use tokio::task;
+use bson::oid::ObjectId;
 
 
 #[derive(Clone, Debug)]
@@ -31,7 +32,31 @@ impl DB {
         })
     }
 
-    pub async fn find(&mut self, collection: &str, query: Document, bulk_size: Option<u64>) -> BoxResult<(Cursor, f64)> {
+    pub async fn newest(&mut self, collection: &str) -> Option<String> {
+
+        // Log which collection this is going into
+        log::info!("Getting newest doc in destination {}.{}", self.db, collection);
+
+        // Get handle on collection
+        let collection_handle = self.client.database(&self.db).collection(collection);
+
+        let options = mongodb::options::FindOneOptions::builder().sort(doc! { "_id": -1 }).projection(doc!{"_id": 1}).build();
+
+        // If a doc is returned, set query
+        match collection_handle.find_one(Some(doc!{}), options).await.ok()? {
+            Some(doc) => {
+                let id = doc.get_object_id("_id").ok()?.to_string();
+                log::info!("Found newest doc with id: {}", &id);
+                Some(id)
+            },
+            None => {
+                log::info!("Collection is empty");
+                None
+            }
+        }
+    }
+
+    pub async fn find(&mut self, collection: &str, bulk_size: Option<u64>, newest: Option<String>) -> BoxResult<(Cursor, f64)> {
         // Log which collection this is going into
         log::debug!("Reading {}.{}", self.db, collection);
 
@@ -49,22 +74,44 @@ impl DB {
 
         let find_options = FindOptions::builder()
             .batch_size(batch_size)
-            .sort(doc! { "_id": -1 })
+            .sort(doc! { "_id": 1 })
             .build();
 
+        // Get handle on collection
+        let collection_handle = self.client.database(&self.db).collection(collection);
+
+        // If --restart is set, find the oldest doc, and start there
+        let query = match newest {
+            Some(ref id) => doc!{ "_id": {"$gt": ObjectId::with_string(id)? } },
+            None => doc!{}
+        };
+
         // Set total in Counter
-        let total = self.count(collection).await?;
+        let total = match newest {
+            Some(_) => {
+                log::info!("Calculating docs past marker");
+                collection_handle.count_documents(query.clone(), None).await? as f64
+            },
+            None => {
+                self.count(collection).await?
+            }
+        };
+
+        // Set counter to total
         self.counter.total(total);
         
-        let collection = self.client.database(&self.db).collection(collection);
-        let cursor = collection.find(query, find_options).await?;
+        let cursor = collection_handle.find(query, find_options).await?;
 
         Ok((cursor, self.counter.total))
     }
 
     pub async fn insert_cursor(&mut self, collection: &str, mut cursor: Cursor, total: f64) -> BoxResult<()> {
+        // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
+
+        // Set counter to total number of docs
         self.counter.total(total);
+
         log::info!("Inserting {} docs to {}.{}", total, self.db, collection);
 
         // Get timestamp
@@ -84,7 +131,7 @@ impl DB {
                     self.counter.incr(&self.db, collection, 1.0, start);
                 }
                 Err(e) => {
-                    log::error!("Caught error getting next doc, skipping: {}", e);
+                    log::error!("Caught error getting next doc: {}", e);
                     continue;
                 }
             };
@@ -94,8 +141,12 @@ impl DB {
     }
 
     pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, total: f64, bulk_count: usize) -> BoxResult<()> {
+        // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
+
+        // Set total docs
         self.counter.total(total);
+
         log::info!("Bulk inserting {} docs to {}.{} in batches of {}", total, self.db, collection, bulk_count);
 
         let insert_many_options = InsertManyOptions::builder()
@@ -162,7 +213,7 @@ impl DB {
                     }
                 }
                 Err(e) => {
-                    log::error!("Caught error getting next doc, skipping: {}", e);
+                    log::error!("Caught error getting next doc: {}", e);
                     continue;
                 }
             }
@@ -226,6 +277,10 @@ impl Counter {
             marker: 0.0,
             total: 0.0,
         }
+    }
+
+    pub fn set(&mut self, count: i64) {
+        self.count = count as f64;
     }
 
     pub fn total(&mut self, total: f64) {

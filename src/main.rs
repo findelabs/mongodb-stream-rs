@@ -5,7 +5,7 @@ use log::LevelFilter;
 use std::io::Write;
 use std::error;
 use db::DB;
-use bson::doc;
+//use bson::doc;
 
 mod db;
 
@@ -65,6 +65,16 @@ async fn main() -> BoxResult<()> {
                 .help("Bulk stream documents")
                 .takes_value(true)
         )
+        .arg(
+            Arg::with_name("restart")
+                .short("r")
+                .long("restart")
+                .required(false)
+                .value_name("STREAM_RESTART")
+                .env("STREAM_RESTART")
+                .help("Restart streaming")
+                .takes_value(false)
+        )
         .get_matches();
 
     // Initialize log Builder
@@ -102,17 +112,23 @@ async fn main() -> BoxResult<()> {
     let mut source_db = DB::init(&source, &db).await?;
     let mut destination_db = DB::init(&destination, &db).await?;
 
+    // If --restart is set, find newest doc
+    let newest_doc = match opts.is_present("restart") {
+        true => destination_db.newest(collection).await,
+        false => None
+    };
+
     // If bulk flag is set, use insertMany
     match bulk {
         Some(bulk_size) => {
             // Acquire cursor from source
-            let (source_cursor,total) = source_db.find(collection, doc!{}, Some(bulk_size as u64)).await?;
+            let (source_cursor,total) = source_db.find(collection, Some(bulk_size as u64), newest_doc).await?;
 
             destination_db.bulk_insert_cursor(collection, source_cursor, total, bulk_size as usize).await?;
         }
         None => {
             // Acquire cursor from source
-            let (source_cursor,total) = source_db.find(collection, doc!{}, None).await?;
+            let (source_cursor,total) = source_db.find(collection, None, newest_doc).await?;
 
             destination_db.insert_cursor(collection, source_cursor, total).await?
         }
