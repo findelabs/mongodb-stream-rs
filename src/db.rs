@@ -4,19 +4,17 @@ use mongodb::bson::{doc, document::Document};
 use mongodb::{options::ClientOptions, options::FindOptions, options::InsertManyOptions, Client, Cursor};
 //use serde::{Deserialize, Serialize};
 use futures::StreamExt;
-//use clap::ArgMatches;
+use clap::ArgMatches;
 use std::error;
 use std::mem;
 //use tokio::runtime::Builder;
 use tokio::task;
 use bson::oid::ObjectId;
 
-
 #[derive(Clone, Debug)]
 pub struct DB {
     pub client: Client,
-    pub db: String,
-    pub counter: Counter
+    pub db: String
 }
 
 type BoxResult<T> = std::result::Result<T, Box<dyn error::Error + Send + Sync>>;
@@ -27,9 +25,12 @@ impl DB {
         client_options.app_name = Some("mongodb-stream-rs".to_string());
         Ok(Self {
             client: Client::with_options(client_options)?,
-            db: db.to_owned(),
-            counter: Counter::new()
+            db: db.to_owned()
         })
+    }
+
+    pub async fn collections(&self) -> BoxResult<Vec<String>> {
+        Ok(self.client.database(&self.db).list_collection_names(None).await?)
     }
 
     pub async fn newest(&mut self, collection: &str) -> Option<String> {
@@ -56,7 +57,10 @@ impl DB {
         }
     }
 
-    pub async fn find(&mut self, collection: &str, bulk_size: Option<u64>, newest: Option<String>) -> BoxResult<(Cursor, f64)> {
+    pub async fn find(&mut self, collection: &str, bulk_size: Option<u64>, newest: Option<String>) -> BoxResult<(Cursor, Counter)> {
+        // Create counter
+        let mut counter = Counter::new();
+
         // Log which collection this is going into
         log::debug!("Reading {}.{}", self.db, collection);
 
@@ -98,21 +102,18 @@ impl DB {
         };
 
         // Set counter to total
-        self.counter.total(total);
+        counter.total(total);
         
         let cursor = collection_handle.find(query, find_options).await?;
 
-        Ok((cursor, self.counter.total))
+        Ok((cursor, counter))
     }
 
-    pub async fn insert_cursor(&mut self, collection: &str, mut cursor: Cursor, total: f64) -> BoxResult<()> {
+    pub async fn insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter) -> BoxResult<()> {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
 
-        // Set counter to total number of docs
-        self.counter.total(total);
-
-        log::info!("Inserting {} docs to {}.{}", total, self.db, collection);
+        log::info!("Inserting {} docs to {}.{}", counter.total, self.db, collection);
 
         // Get timestamp
         let start = Utc::now().timestamp();
@@ -128,7 +129,7 @@ impl DB {
                             log::debug!("Got error: {}", e);
                         }
                     }
-                    self.counter.incr(&self.db, collection, 1.0, start);
+                    counter.incr(&self.db, collection, 1.0, start);
                 }
                 Err(e) => {
                     log::error!("Caught error getting next doc: {}", e);
@@ -140,14 +141,11 @@ impl DB {
         Ok(())
     }
 
-    pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, total: f64, bulk_count: usize) -> BoxResult<()> {
+    pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize) -> BoxResult<()> {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
 
-        // Set total docs
-        self.counter.total(total);
-
-        log::info!("Bulk inserting {} docs to {}.{} in batches of {}", total, self.db, collection, bulk_count);
+        log::info!("Bulk inserting {} docs to {}.{} in batches of {}", counter.total, self.db, collection, bulk_count);
 
         let insert_many_options = InsertManyOptions::builder()
             .ordered(Some(false))
@@ -159,8 +157,8 @@ impl DB {
         // Get timestamp
         let start = Utc::now().timestamp();
         
-        // Set counter
-        let mut counter: usize = 0;
+        // Set count
+        let mut count: usize = 0;
 
         // Create tokio runtime
 //        let runtime = Builder::new_multi_thread()
@@ -181,11 +179,11 @@ impl DB {
                 Ok(d) => {
                     // Push to vec, incr counter, and print debug log
                     bulk.push(d);
-                    counter += 1;
-                    log::debug!("inserted doc: {}/{}", counter, bulk_count);
+                    count += 1;
+                    log::debug!("inserted doc: {}/{}", count, bulk_count);
 
                     // If counter is greater or equal to bulk_count
-                    if counter >= bulk_count {
+                    if count >= bulk_count || count == counter.total as usize {
 
                         // Create a new empty vec, then swap, to avoid clone()
                         let mut tmp_bulk: Vec<Document> = Vec::with_capacity(bulk_count);
@@ -196,18 +194,17 @@ impl DB {
                         let options = insert_many_options.clone();
 
                         task::spawn(async move {
-
-                        match coll_clone.insert_many(tmp_bulk, options.clone()).await {
-                            Ok(_) => {
-                                log::debug!("Bulk inserted {} docs", bulk_count);
+                            match coll_clone.insert_many(tmp_bulk, options.clone()).await {
+                                Ok(_) => {
+                                    log::debug!("Bulk inserted {} docs", bulk_count);
+                                }
+                                Err(e) => {
+                                    log::debug!("Got error with insertMany: {}", e);
+                                }
                             }
-                            Err(e) => {
-                                log::debug!("Got error with insertMany: {}", e);
-                            }
-                        }
                         });
-                        counter = 0;
-                        self.counter.incr(&self.db, collection, bulk_count as f64, start);
+                        count = 0;
+                        counter.incr(&self.db, collection, bulk_count as f64, start);
                     } else {
                         continue
                     }
@@ -279,9 +276,9 @@ impl Counter {
         }
     }
 
-    pub fn set(&mut self, count: i64) {
-        self.count = count as f64;
-    }
+//    pub fn set(&mut self, count: i64) {
+//        self.count = count as f64;
+//    }
 
     pub fn total(&mut self, total: f64) {
         self.total = total;
@@ -303,4 +300,34 @@ impl Counter {
             self.marker += 1f64;
         };
     }
+}
+
+pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatches<'_>, collection: String) -> BoxResult<()> {
+
+    let bulk = match opts.is_present("bulk") {
+        true => Some(opts.value_of("bulk").unwrap().parse::<u32>()?),
+        false => None
+    };
+
+    // If --restart is set, find newest doc
+    let newest_doc = match opts.is_present("restart") {
+        true => destination_db.newest(&collection).await,
+        false => None
+    };
+    
+    // If bulk flag is set, use insertMany
+    match bulk {
+        Some(bulk_size) => {
+            // Acquire cursor from source
+            let (source_cursor,counter) = source_db.find(&collection, Some(bulk_size as u64), newest_doc).await?;
+            destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize).await?;
+        }
+        None => {
+            // Acquire cursor from source
+            let (source_cursor,counter) = source_db.find(&collection, None, newest_doc).await?;
+            destination_db.insert_cursor(&collection, source_cursor, counter).await?
+        }   
+    };
+
+    Ok(())
 }

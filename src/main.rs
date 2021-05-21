@@ -4,8 +4,9 @@ use env_logger::{Builder, Target};
 use log::LevelFilter;
 use std::io::Write;
 use std::error;
-use db::DB;
+use db::{DB, transfer};
 //use bson::doc;
+use tokio::task;
 
 mod db;
 
@@ -49,7 +50,7 @@ async fn main() -> BoxResult<()> {
             Arg::with_name("collection")
                 .short("c")
                 .long("collection")
-                .required(true)
+                .required(false)
                 .value_name("MONGODB_COLLECTION")
                 .env("MONGODB_COLLECTION")
                 .help("MongoDB Collection")
@@ -96,12 +97,7 @@ async fn main() -> BoxResult<()> {
     // Create vars for required variables
     let source = &opts.value_of("source_uri").unwrap();
     let destination= &opts.value_of("destination_uri").unwrap();
-    let collection = &opts.value_of("collection").unwrap();
     let db = &opts.value_of("db").unwrap();
-    let bulk = match opts.is_present("bulk") {
-        true => Some(opts.value_of("bulk").unwrap().parse::<u32>()?),
-        false => None
-    };
 
     println!(
         "Starting mongodb-stream-rs:{}", 
@@ -109,31 +105,41 @@ async fn main() -> BoxResult<()> {
     );
 
     // Create connections to source and destination db's
-    let mut source_db = DB::init(&source, &db).await?;
-    let mut destination_db = DB::init(&destination, &db).await?;
+    let source_db = DB::init(&source, &db).await?;
+    let destination_db = DB::init(&destination, &db).await?;
 
-    // If --restart is set, find newest doc
-    let newest_doc = match opts.is_present("restart") {
-        true => destination_db.newest(collection).await,
-        false => None
+
+    let collections = match &opts.is_present("collection") {
+        true => {
+            let mut vec: Vec<String> = Vec::new();
+            let coll = &opts.value_of("collection").unwrap();
+            vec.push(coll.to_string());
+            vec
+        },
+        false => source_db.collections().await?
     };
 
-    // If bulk flag is set, use insertMany
-    match bulk {
-        Some(bulk_size) => {
-            // Acquire cursor from source
-            let (source_cursor,total) = source_db.find(collection, Some(bulk_size as u64), newest_doc).await?;
+    // Create vector for handles
+    let mut handles = vec![];
 
-            destination_db.bulk_insert_cursor(collection, source_cursor, total, bulk_size as usize).await?;
-        }
-        None => {
-            // Acquire cursor from source
-            let (source_cursor,total) = source_db.find(collection, None, newest_doc).await?;
+    // Loop over collections and start uploading
+    for collection in collections {
 
-            destination_db.insert_cursor(collection, source_cursor, total).await?
-        }
+        let source = source_db.clone();
+        let destination = destination_db.clone();
+        let opts = opts.clone();
+
+        handles.push(task::spawn(async move {
+            match transfer(source, destination, opts, collection).await {
+                Ok(_) => log::info!("Shutdown thread"),
+                Err(e) => log::error!("Thread error: {}", e)
+            }
+        }));
 
     };
+
+    // Join all handles
+    futures::future::join_all(handles).await;
 
     Ok(())
 }
