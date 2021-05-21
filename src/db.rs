@@ -8,8 +8,11 @@ use clap::ArgMatches;
 use std::error;
 use std::mem;
 //use tokio::runtime::Builder;
-use tokio::task;
+//use tokio::task;
 use bson::oid::ObjectId;
+use tokio::runtime::Builder;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
 pub struct DB {
@@ -172,6 +175,18 @@ impl DB {
 //            .build()
 //            .unwrap();
 
+        // Create vector for task handles
+        let mut handles = vec![];
+
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("Upload Runtime")
+            .build()
+            .unwrap();
+
+        // Let's rate limit to just 10 uploads at once
+        let sem = Arc::new(Semaphore::new(4));
+
 
         // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
         while let Some(doc) = cursor.next().await {
@@ -193,7 +208,9 @@ impl DB {
                         let coll_clone = coll.clone();
                         let options = insert_many_options.clone();
 
-                        task::spawn(async move {
+                        let permit = Arc::clone(&sem).acquire_owned().await;
+                        handles.push(runtime.spawn(async move {
+                            let _permit = permit;
                             match coll_clone.insert_many(tmp_bulk, options.clone()).await {
                                 Ok(_) => {
                                     log::debug!("Bulk inserted {} docs", bulk_count);
@@ -202,7 +219,7 @@ impl DB {
                                     log::debug!("Got error with insertMany: {}", e);
                                 }
                             }
-                        });
+                        }));
                         count = 0;
                         counter.incr(&self.db, collection, bulk_count as f64, start);
                     } else {
@@ -215,6 +232,10 @@ impl DB {
                 }
             }
         }
+
+        // Wait for all handles to complete
+        futures::future::join_all(handles).await;
+
         log::info!("Completed {}.{}", self.db, collection);
         Ok(())
     }
