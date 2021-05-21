@@ -7,10 +7,8 @@ use futures::StreamExt;
 use clap::ArgMatches;
 use std::error;
 use std::mem;
-//use tokio::runtime::Builder;
 //use tokio::task;
 use bson::oid::ObjectId;
-use tokio::runtime::Builder;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -39,7 +37,7 @@ impl DB {
     pub async fn newest(&mut self, collection: &str) -> Option<String> {
 
         // Log which collection this is going into
-        log::info!("Getting newest doc in destination {}.{}", self.db, collection);
+        log::info!("{}.{}: Getting newest doc in destination", self.db, collection);
 
         // Get handle on collection
         let collection_handle = self.client.database(&self.db).collection(collection);
@@ -47,14 +45,22 @@ impl DB {
         let options = mongodb::options::FindOneOptions::builder().sort(doc! { "_id": -1 }).projection(doc!{"_id": 1}).build();
 
         // If a doc is returned, set query
-        match collection_handle.find_one(Some(doc!{}), options).await.ok()? {
-            Some(doc) => {
-                let id = doc.get_object_id("_id").ok()?.to_string();
-                log::info!("Found newest doc with id: {}", &id);
-                Some(id)
+        match collection_handle.find_one(Some(doc!{}), options).await {
+            Ok(result) => {
+                match result {
+                    Some(doc) => {
+                        let id = doc.get_object_id("_id").ok()?.to_string();
+                        log::info!("{}.{}: Found newest doc with id: {}", self.db, collection, &id);
+                        Some(id)
+                    },
+                    None => {
+                        log::info!("{}.{}: Destination collection is empty", self.db, collection);
+                        None
+                    }
+                }
             },
-            None => {
-                log::info!("Collection is empty");
+            Err(e) => {
+                log::info!("{}.{}: Error finding newest doc: {}", self.db, collection, e);
                 None
             }
         }
@@ -70,7 +76,7 @@ impl DB {
         let batch_size = match bulk_size {
             Some(bulk_size) => {
                 if bulk_size > 6400 {
-                    log::info!("Setting mongo cursor batch_size to 6400");
+                    log::info!("{}.{}: Setting mongo cursor batch_size to 6400", self.db, collection);
                     Some(6400u32)
                 } else {
                     Some(bulk_size as u32)
@@ -96,10 +102,11 @@ impl DB {
         // Set total in Counter
         let total = match newest {
             Some(_) => {
-                log::info!("Calculating docs past marker");
+                log::info!("{}.{}: Calculating docs past marker", self.db, collection);
                 collection_handle.count_documents(query.clone(), None).await? as f64
             },
             None => {
+                log::info!("{}.{}: No newest doc found, counting all docs in collection", self.db, collection);
                 self.count(collection).await?
             }
         };
@@ -116,7 +123,7 @@ impl DB {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
 
-        log::info!("Inserting {} docs to {}.{}", counter.total, self.db, collection);
+        log::info!("{}.{}: Inserting {} docs", self.db, collection, counter.total);
 
         // Get timestamp
         let start = Utc::now().timestamp();
@@ -126,21 +133,21 @@ impl DB {
                 Ok(doc) => {
                     match coll.insert_one(doc, None).await {
                         Ok(id) => {
-                            log::debug!("Inserted id: {}", id.inserted_id.to_string());
+                            log::debug!("{}.{}: Inserted id: {}", self.db, collection, id.inserted_id.to_string());
                         }
                         Err(e) => {
-                            log::debug!("Got error: {}", e);
+                            log::debug!("{}.{}: Got error: {}", self.db, collection, e);
                         }
                     }
                     counter.incr(&self.db, collection, 1.0, start);
                 }
                 Err(e) => {
-                    log::error!("Caught error getting next doc: {}", e);
+                    log::error!("{}.{}: Caught error getting next doc: {}", self.db, collection, e);
                     continue;
                 }
             };
         }
-        log::info!("Completed {}.{}", self.db, collection);
+        log::info!("{}.{}: Completed", self.db, collection);
         Ok(())
     }
 
@@ -148,7 +155,11 @@ impl DB {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
 
-        log::info!("Bulk inserting {} docs to {}.{} in batches of {}", counter.total, self.db, collection, bulk_count);
+        if counter.total != 0.0 {
+            log::info!("{}.{}: Bulk inserting {} docs in batches of {}", self.db, collection, counter.total, bulk_count);
+        } else {
+            log::info!("{}.{}: There are {} docs to upload", self.db, collection, counter.total);
+        };
 
         let insert_many_options = InsertManyOptions::builder()
             .ordered(Some(false))
@@ -163,30 +174,11 @@ impl DB {
         // Set count
         let mut count: usize = 0;
 
-        // Create tokio runtime
-//        let runtime = Builder::new_multi_thread()
-//            .max_blocking_threads(4usize)
-//            .on_thread_start(|| {
-//                println!("thread started");
-//            })
-//            .on_thread_stop(|| {
-//                println!("thread stopping");
-//            })
-//            .build()
-//            .unwrap();
-
         // Create vector for task handles
         let mut handles = vec![];
 
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("Upload Runtime")
-            .build()
-            .unwrap();
-
         // Let's rate limit to just 10 uploads at once
         let sem = Arc::new(Semaphore::new(4));
-
 
         // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
         while let Some(doc) = cursor.next().await {
@@ -195,10 +187,10 @@ impl DB {
                     // Push to vec, incr counter, and print debug log
                     bulk.push(d);
                     count += 1;
-                    log::debug!("inserted doc: {}/{}", count, bulk_count);
+                    log::debug!("{}.{}: inserted doc: {}/{}", self.db, collection, count, bulk_count);
 
                     // If counter is greater or equal to bulk_count
-                    if count >= bulk_count || count == counter.total as usize {
+                    if count >= bulk_count || (count + counter.count as usize) == counter.total as usize {
 
                         // Create a new empty vec, then swap, to avoid clone()
                         let mut tmp_bulk: Vec<Document> = Vec::with_capacity(bulk_count);
@@ -208,8 +200,10 @@ impl DB {
                         let coll_clone = coll.clone();
                         let options = insert_many_options.clone();
 
+                        // Get permission to kick off task
                         let permit = Arc::clone(&sem).acquire_owned().await;
-                        handles.push(runtime.spawn(async move {
+
+                        handles.push(tokio::spawn(async move {
                             let _permit = permit;
                             match coll_clone.insert_many(tmp_bulk, options.clone()).await {
                                 Ok(_) => {
@@ -227,7 +221,7 @@ impl DB {
                     }
                 }
                 Err(e) => {
-                    log::error!("Caught error getting next doc: {}", e);
+                    log::error!("{}.{} Caught error getting next doc: {}", self.db, collection, e);
                     continue;
                 }
             }
@@ -236,7 +230,7 @@ impl DB {
         // Wait for all handles to complete
         futures::future::join_all(handles).await;
 
-        log::info!("Completed {}.{}", self.db, collection);
+        log::info!("{}.{}: Completed", self.db, collection);
         Ok(())
     }
 
@@ -291,9 +285,9 @@ pub struct Counter {
 impl Counter {
     pub fn new() -> Counter {
         Counter {
-            count: 0.0,
-            marker: 0.0,
-            total: 0.0,
+            count: 0.0,     // Count of docs uploaded
+            marker: 0.0,    // Percentage tracker
+            total: 0.0,     // Total count of all docs in collection
         }
     }
 
@@ -316,7 +310,9 @@ impl Counter {
         // Get insert rate
         let rate = self.count / delta as f64;
 
-        if percent - self.marker > 1.0 {
+        if self.count >= self.total {
+            log::info!("{}.{}: 100%, {:.2}/s, {}/{}", db, collection, rate, self.total, self.total);
+        } else if percent - self.marker > 1.0 {
             log::info!("{}.{}: {:.2}%, {:.2}/s, {}/{}", db, collection, percent, rate, self.count, self.total);
             self.marker += 1f64;
         };
@@ -325,9 +321,9 @@ impl Counter {
 
 pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatches<'_>, collection: String) -> BoxResult<()> {
 
-    let bulk = match opts.is_present("bulk") {
-        true => Some(opts.value_of("bulk").unwrap().parse::<u32>()?),
-        false => None
+    let bulk_size = match opts.is_present("bulk") {
+        true => opts.value_of("bulk").unwrap().parse::<u32>()?,
+        false => 2000u32
     };
 
     // If --restart is set, find newest doc
@@ -337,13 +333,13 @@ pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatche
     };
     
     // If bulk flag is set, use insertMany
-    match bulk {
-        Some(bulk_size) => {
+    match opts.is_present("nobulk") {
+        false => {
             // Acquire cursor from source
             let (source_cursor,counter) = source_db.find(&collection, Some(bulk_size as u64), newest_doc).await?;
             destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize).await?;
         }
-        None => {
+        true => {
             // Acquire cursor from source
             let (source_cursor,counter) = source_db.find(&collection, None, newest_doc).await?;
             destination_db.insert_cursor(&collection, source_cursor, counter).await?

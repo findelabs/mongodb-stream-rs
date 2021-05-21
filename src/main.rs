@@ -6,7 +6,8 @@ use std::io::Write;
 use std::error;
 use db::{DB, transfer};
 //use bson::doc;
-use tokio::task;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 mod db;
 
@@ -64,6 +65,7 @@ async fn main() -> BoxResult<()> {
                 .value_name("STREAM_BULK")
                 .env("STREAM_BULK")
                 .help("Bulk stream documents")
+                .conflicts_with("nobulk")
                 .takes_value(true)
         )
         .arg(
@@ -74,6 +76,17 @@ async fn main() -> BoxResult<()> {
                 .value_name("STREAM_RESTART")
                 .env("STREAM_RESTART")
                 .help("Restart streaming")
+                .takes_value(false)
+        )
+        .arg(
+            Arg::with_name("nobulk")
+                .short("n")
+                .long("nobulk")
+                .required(false)
+                .value_name("STREAM_NOBULK")
+                .env("STREAM_NOBULK")
+                .help("Do not upload docs in batches")
+                .conflicts_with("bulk")
                 .takes_value(false)
         )
         .get_matches();
@@ -122,6 +135,9 @@ async fn main() -> BoxResult<()> {
     // Create vector for handles
     let mut handles = vec![];
 
+    // Let's rate limit to just 4 collections at once
+    let sem = Arc::new(Semaphore::new(4));
+
     // Loop over collections and start uploading
     for collection in collections {
 
@@ -129,9 +145,13 @@ async fn main() -> BoxResult<()> {
         let destination = destination_db.clone();
         let opts = opts.clone();
 
-        handles.push(task::spawn(async move {
+        // Get permission to kick off task
+        let permit = Arc::clone(&sem).acquire_owned().await;
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
             match transfer(source, destination, opts, collection).await {
-                Ok(_) => log::info!("Shutdown thread"),
+                Ok(_) => log::debug!("Thread shutdown"),
                 Err(e) => log::error!("Thread error: {}", e)
             }
         }));
