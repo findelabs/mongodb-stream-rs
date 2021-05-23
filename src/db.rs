@@ -162,7 +162,7 @@ impl DB {
         };
 
         let insert_many_options = InsertManyOptions::builder()
-            .ordered(Some(false))
+            .ordered(Some(true))        // This should stay true, so that --restart is able to properly start where the last operation left off
             .build();
 
         // Create vector of documents to bulk upload
