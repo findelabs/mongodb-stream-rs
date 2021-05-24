@@ -69,13 +69,13 @@ async fn main() -> BoxResult<()> {
                 .takes_value(true)
         )
         .arg(
-            Arg::with_name("restart")
-                .short("r")
-                .long("restart")
+            Arg::with_name("continue")
+                .short("c")
+                .long("continue")
                 .required(false)
-                .value_name("STREAM_RESTART")
-                .env("STREAM_RESTART")
-                .help("Restart streaming")
+                .value_name("STREAM_CONTINUE")
+                .env("STREAM_CONTINUE")
+                .help("Restart streaming at the newest document")
                 .takes_value(false)
         )
         .arg(
@@ -88,6 +88,16 @@ async fn main() -> BoxResult<()> {
                 .help("Do not upload docs in batches")
                 .conflicts_with("bulk")
                 .takes_value(false)
+        )
+        .arg(
+            Arg::with_name("threads")
+                .short("t")
+                .long("threads")
+                .required(false)
+                .value_name("STREAM_THREADS")
+                .env("STREAM_THREADS")
+                .help("Concurrent collections to transfer")
+                .takes_value(true)
         )
         .get_matches();
 
@@ -136,7 +146,14 @@ async fn main() -> BoxResult<()> {
     let mut handles = vec![];
 
     // Let's rate limit to just 4 collections at once
-    let sem = Arc::new(Semaphore::new(4));
+    let sem = match &opts.is_present("threads") {
+        true => {
+            let threads = &opts.value_of("threads").expect("unable to get threads").parse::<usize>()?;
+            log::info!("Transfering {} collections at once", threads);
+            Arc::new(Semaphore::new(*threads))
+        },
+        false => Arc::new(Semaphore::new(4))
+    };
 
     // Loop over collections and start uploading
     for collection in collections {

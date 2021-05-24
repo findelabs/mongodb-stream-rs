@@ -93,7 +93,7 @@ impl DB {
         // Get handle on collection
         let collection_handle = self.client.database(&self.db).collection(collection);
 
-        // If --restart is set, find the oldest doc, and start there
+        // If --continue is set, find the oldest doc, and start there
         let query = match newest {
             Some(ref id) => doc!{ "_id": {"$gt": ObjectId::with_string(id)? } },
             None => doc!{}
@@ -106,7 +106,7 @@ impl DB {
                 collection_handle.count_documents(query.clone(), None).await? as f64
             },
             None => {
-                log::info!("{}.{}: No newest doc found, counting all docs in collection", self.db, collection);
+                log::info!("{}.{}: Counting all docs in collection", self.db, collection);
                 self.count(collection).await?
             }
         };
@@ -147,11 +147,11 @@ impl DB {
                 }
             };
         }
-        log::info!("{}.{}: Completed", self.db, collection);
+        log::info!("{}.{}: Closing cursor", self.db, collection);
         Ok(())
     }
 
-    pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize) -> BoxResult<()> {
+    pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize, continue_upload: bool) -> BoxResult<()> {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
 
@@ -161,9 +161,18 @@ impl DB {
             log::info!("{}.{}: There are {} docs to upload", self.db, collection, counter.total);
         };
 
-        let insert_many_options = InsertManyOptions::builder()
-            .ordered(Some(true))        // This should stay true, so that --restart is able to properly start where the last operation left off
-            .build();
+        let insert_many_options = match continue_upload {
+            true => {
+                InsertManyOptions::builder()
+                    .ordered(Some(true))        // This should stay true, so that --continue is able to properly start where the last operation left off
+                    .build()
+            },
+            false=> {
+                InsertManyOptions::builder()
+                    .ordered(Some(false))        // If --continue is not set, go ahead and use unordered inserts
+                    .build()
+            }
+        };
 
         // Create vector of documents to bulk upload
         let mut bulk: Vec<Document> = Vec::with_capacity(bulk_count);
@@ -177,7 +186,7 @@ impl DB {
         // Create vector for task handles
         let mut handles = vec![];
 
-        // Let's rate limit to just 10 uploads at once
+        // Let's rate limit to just 4 uploads at once
         let sem = Arc::new(Semaphore::new(4));
 
         // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
@@ -214,8 +223,8 @@ impl DB {
                                 }
                             }
                         }));
+                        counter.incr(&self.db, collection, count as f64, start);
                         count = 0;
-                        counter.incr(&self.db, collection, bulk_count as f64, start);
                     } else {
                         continue
                     }
@@ -230,7 +239,7 @@ impl DB {
         // Wait for all handles to complete
         futures::future::join_all(handles).await;
 
-        log::info!("{}.{}: Completed", self.db, collection);
+        log::info!("{}.{}: Closing cursor", self.db, collection);
         Ok(())
     }
 
@@ -326,8 +335,8 @@ pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatche
         false => 2000u32
     };
 
-    // If --restart is set, find newest doc
-    let newest_doc = match opts.is_present("restart") {
+    // If --continue is set, find newest doc
+    let newest_doc = match opts.is_present("continue") {
         true => destination_db.newest(&collection).await,
         false => None
     };
@@ -337,7 +346,7 @@ pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatche
         false => {
             // Acquire cursor from source
             let (source_cursor,counter) = source_db.find(&collection, Some(bulk_size as u64), newest_doc).await?;
-            destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize).await?;
+            destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize, opts.is_present("continue")).await?;
         }
         true => {
             // Acquire cursor from source
