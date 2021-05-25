@@ -199,7 +199,7 @@ impl DB {
                     log::debug!("{}.{}: inserted doc: {}/{}", self.db, collection, count, bulk_count);
 
                     // If counter is greater or equal to bulk_count
-                    if count >= bulk_count || (count + counter.count as usize) == counter.total as usize {
+                    if count >= bulk_count || (count + counter.count as usize) >= counter.total as usize {
 
                         // Create a new empty vec, then swap, to avoid clone()
                         let mut tmp_bulk: Vec<Document> = Vec::with_capacity(bulk_count);
@@ -320,7 +320,7 @@ impl Counter {
         let rate = self.count / delta as f64;
 
         if self.count >= self.total {
-            log::info!("{}.{}: 100%, {:.2}/s, {}/{}", db, collection, rate, self.total, self.total);
+            log::info!("{}.{}: 100%, {:.2}/s, {}/{}", db, collection, rate, self.count, self.total);
         } else if percent - self.marker > 1.0 {
             log::info!("{}.{}: {:.2}%, {:.2}/s, {}/{}", db, collection, percent, rate, self.count, self.total);
             self.marker += 1f64;
