@@ -199,7 +199,7 @@ impl DB {
                     log::debug!("{}.{}: inserted doc: {}/{}", self.db, collection, count, bulk_count);
 
                     // If counter is greater or equal to bulk_count
-                    if count >= bulk_count || (count + counter.count as usize) >= counter.total as usize {
+                    if count >= bulk_count {
 
                         // Create a new empty vec, then swap, to avoid clone()
                         let mut tmp_bulk: Vec<Document> = Vec::with_capacity(bulk_count);
@@ -236,7 +236,22 @@ impl DB {
             }
         }
 
+        // Push any remaining docs to destination
+        let bulk_len = &bulk.len();
+        if bulk_len > &0 {
+            match coll.insert_many(bulk, insert_many_options).await {
+                Ok(_) => {
+                    log::debug!("Bulk inserted {} docs", bulk_len);
+                }
+                Err(e) => {
+                    log::debug!("Got error with insertMany: {}", e);
+                }
+            };
+            counter.incr(&self.db, collection, *bulk_len as f64, start);
+        };
+
         // Wait for all handles to complete
+        log::info!("{}.{}: Waiting for all threads to close", self.db, collection);
         futures::future::join_all(handles).await;
 
         log::info!("{}.{}: Closing cursor", self.db, collection);
@@ -319,10 +334,14 @@ impl Counter {
         // Get insert rate
         let rate = self.count / delta as f64;
 
-        if self.count >= self.total {
+        if self.count == self.total {
             log::info!("{}.{}: 100%, {:.2}/s, {}/{}", db, collection, rate, self.count, self.total);
         } else if percent - self.marker > 1.0 {
-            log::info!("{}.{}: {:.2}%, {:.2}/s, {}/{}", db, collection, percent, rate, self.count, self.total);
+            if self.count > self.total {
+                log::info!("{}.{}: (catching up) {:.2}%, {:.2}/s, {}/{}", db, collection, percent, rate, self.count, self.total);
+            } else {
+                log::info!("{}.{}: {:.2}%, {:.2}/s, {}/{}", db, collection, percent, rate, self.count, self.total);
+            }
             self.marker += 1f64;
         };
     }
