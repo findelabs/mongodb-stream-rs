@@ -1,7 +1,7 @@
 use chrono::offset::Utc;
 use mongodb::bson::{doc, document::Document};
 //use mongodb::{options::ClientOptions, options::FindOptions, Client, Collection};
-use mongodb::{options::ClientOptions, options::FindOptions, options::InsertManyOptions, Client, Cursor};
+use mongodb::{options::ClientOptions, options::FindOneOptions,  options::FindOptions, options::InsertManyOptions, Client, Cursor};
 //use serde::{Deserialize, Serialize};
 use futures::StreamExt;
 use clap::ArgMatches;
@@ -151,6 +151,43 @@ impl DB {
         Ok(())
     }
 
+    pub async fn validate_docs(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter) -> BoxResult<()> {
+        // Get handle on collection
+        let coll = self.client.database(&self.db).collection(collection);
+
+        log::info!("{}.{}: Validating that {} docs in destination exist in source", self.db, collection, counter.total);
+
+        // Get timestamp
+        let start = Utc::now().timestamp();
+
+        let find_one_options = FindOneOptions::builder()
+            .projection(doc! { "_id": 1 })
+            .build();
+
+        while let Some(doc) = cursor.next().await {
+            match doc {
+                Ok(doc) => {
+                    let id = doc.get_object_id("_id")?;
+                    match coll.find_one(doc!{ "_id": id }, find_one_options.clone()).await {
+                        Ok(_id) => {
+                            log::debug!("{}.{}: Found {} in source collection", self.db, collection, id);
+                        }
+                        Err(e) => {
+                            log::error!("{}.{}: Got error finding {}: {}", self.db, collection, id, e);
+                        }
+                    }
+                    counter.incr(&self.db, collection, 1.0, start);
+                }
+                Err(e) => {
+                    log::error!("{}.{}: Caught error getting next doc: {}", self.db, collection, e);
+                    continue;
+                }
+            };
+        }
+        log::info!("{}.{}: Completed validation, closing cursor", self.db, collection);
+        Ok(())
+    }
+
     pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize, continue_upload: bool) -> BoxResult<()> {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
@@ -183,11 +220,15 @@ impl DB {
         // Set count
         let mut count: usize = 0;
 
+// DEBUG
+//        let mut bulk_uploads = 0;
+// END
+
         // Create vector for task handles
         let mut handles = vec![];
 
         // Let's rate limit to just 4 uploads at once
-        let sem = Arc::new(Semaphore::new(4));
+        let sem = Arc::new(Semaphore::new(1));
 
         // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
         while let Some(doc) = cursor.next().await {
@@ -219,11 +260,22 @@ impl DB {
                                     log::debug!("Bulk inserted {} docs", bulk_count);
                                 }
                                 Err(e) => {
-                                    log::debug!("Got error with insertMany: {}", e);
+                                    log::error!("Got error with insertMany: {}", e);
                                 }
                             }
                         }));
+//                            };
+
                         counter.incr(&self.db, collection, count as f64, start);
+
+                        // DEBUG
+ //                       let current_total = self.count(collection).await.expect("expect failed");
+ //                       if current_total != counter.count() {
+ //                           println!("total docs inserted: {}, docs in collection: {}", counter.count(), current_total);
+ //                       };
+ //                       bulk_uploads += 1;
+                        // END DEBUG
+
                         count = 0;
                     } else {
                         continue
@@ -236,6 +288,10 @@ impl DB {
             }
         }
 
+        // DEBUG
+        //log::info!("Bulk uploads completed: {}", bulk_uploads);
+        // END
+
         // Push any remaining docs to destination
         let bulk_len = &bulk.len();
         if bulk_len > &0 {
@@ -244,15 +300,16 @@ impl DB {
                     log::debug!("Bulk inserted {} docs", bulk_len);
                 }
                 Err(e) => {
-                    log::debug!("Got error with insertMany: {}", e);
+                    log::error!("Got error with insertMany: {}", e);
                 }
             };
             counter.incr(&self.db, collection, *bulk_len as f64, start);
         };
 
         // Wait for all handles to complete
-        log::info!("{}.{}: Waiting for all threads to close", self.db, collection);
-        futures::future::join_all(handles).await;
+//        log::info!("{}.{}: Waiting for all threads to close", self.db, collection);
+//        futures::future::join_all(handles).await;
+//        log::info!("{}.{}: Injected {} docs", self.db, collection, counter.count());
 
         log::info!("{}.{}: Closing cursor", self.db, collection);
         Ok(())
@@ -323,6 +380,10 @@ impl Counter {
         self.total = total;
     }
 
+    pub fn count(&self) -> f64 {
+        self.count
+    }
+
     pub fn incr(&mut self, db: &str, collection: &str, count: f64, start: i64) {
         self.count += count;
         let percent = self.count / self.total * 100.0;
@@ -373,6 +434,16 @@ pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatche
             destination_db.insert_cursor(&collection, source_cursor, counter).await?
         }   
     };
+
+    Ok(())
+}
+
+pub async fn validate(mut source_db: DB, mut destination_db: DB, _opts: ArgMatches<'_>, collection: String) -> BoxResult<()> {
+    // Open cursor of all docs in destination
+    let (destination_cursor,counter) = destination_db.find(&collection, None, None).await?;
+
+    // Make sure all docs in destination exist in source
+    source_db.validate_docs(&collection, destination_cursor, counter).await?;
 
     Ok(())
 }

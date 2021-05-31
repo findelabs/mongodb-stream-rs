@@ -4,7 +4,7 @@ use env_logger::{Builder, Target};
 use log::LevelFilter;
 use std::io::Write;
 use std::error;
-use db::{DB, transfer};
+use db::{DB, transfer, validate};
 //use bson::doc;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -99,6 +99,15 @@ async fn main() -> BoxResult<()> {
                 .help("Concurrent collections to transfer")
                 .takes_value(true)
         )
+        .arg(
+            Arg::with_name("validate")
+                .long("validate")
+                .required(false)
+                .value_name("MONGODB_VALIDATE")
+                .env("MONGODB_VALIDATE")
+                .help("Validate docs in destination")
+                .takes_value(false)
+        )
         .get_matches();
 
     // Initialize log Builder
@@ -167,8 +176,17 @@ async fn main() -> BoxResult<()> {
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            match transfer(source, destination, opts, collection).await {
-                Ok(_) => log::debug!("Thread shutdown"),
+            match transfer(source.clone(), destination.clone(), opts.clone(), collection.clone()).await {
+                Ok(_) => {
+                    // Check docs
+                    if opts.is_present("validate") {
+                        match validate(source, destination, opts, collection).await {
+                            Ok(_) => log::debug!("Thread shutdown"),
+                            Err(e) => log::error!("Thread error: {}", e)
+                        };
+                    };
+                    log::debug!("Thread shutdown");
+                },
                 Err(e) => log::error!("Thread error: {}", e)
             }
         }));
