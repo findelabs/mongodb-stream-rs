@@ -9,6 +9,12 @@ Once rust has been [installed](https://www.rust-lang.org/tools/install), simply 
 cargo install --git https://github.com/findelabs/monogdb-stream-rs.git
 ```
 
+### Technical
+
+This tool is written in rust and leverages the tokio runtime in order to send multiple collection to the destination database at once. By default mongodb-stream-rs will upload four collections in parellel. By default, uploads are transmitted in batches of 2000 docs, but this option can be changed with the `--bulk` flag. You can override this default with the `--nobulk` flag in order to have this tool upload one doc at a time.
+
+If only a database name is passed to the app, then this tool will upload all collections within the db. However, you can specify a single collection to upload with `--collection`.
+
 ### Arguments
 
 ```
@@ -16,11 +22,21 @@ USAGE:
     mongodb-stream-rs [FLAGS] [OPTIONS] --db <MONGODB_DB> --destination_uri <STREAM_DEST> --source_uri <STREAM_SOURCE>
 
 FLAGS:
-    --db <MONGODB_DB>   # MongoDB DB Name
-    --destination_uri <STREAM_DEST> # Destination standalone/replicaset
-    --source_uri <STREAM_SOURCE> # Source standalone/replicaset
+    -c, --continue    Restart streaming at the newest document
+    -h, --help        Prints help information
+    -n, --nobulk      Do not upload docs in batches
+        --validate    Validate docs in destination
+    -V, --version     Prints version information
 
 OPTIONS:
-    --continue  # Pick up upload at the newest doc in destination
-    --validate  # Confirm that all docs in destination exist in source
+    -b, --bulk <STREAM_BULK>                 Bulk stream documents [env: STREAM_BULK=]
+    -c, --collection <MONGODB_COLLECTION>    MongoDB Collection [env: MONGODB_COLLECTION=]
+    -d, --db <MONGODB_DB>                    MongoDB Database [env: MONGODB_DB=]
+        --destination_uri <STREAM_DEST>      Destination MongoDB URI [env: STREAM_DEST=]
+        --source_uri <STREAM_SOURCE>         Source MongoDB URI [env: STREAM_SOURCE=]
+    -t, --threads <STREAM_THREADS>           Concurrent collections to transfer [env: STREAM_THREADS=]
 ```
+
+### Future
+
+We plan to utilize watch() on a db, nce the mongodb rust driver supports opening a watch on a database. This will effectively remove the need for `--continue`, especially if updates are being done on the source db.
