@@ -39,4 +39,4 @@ OPTIONS:
 
 ### Future
 
-We plan to utilize watch() on a db, nce the mongodb rust driver supports opening a watch on a database. This will effectively remove the need for `--continue`, especially if updates are being done on the source db.
+We plan to utilize watch(), once the mongodb rust driver supports opening a watch on a database. This will effectively remove the need for `--continue`, especially if updates are being done on the source db.
