@@ -1,7 +1,7 @@
 use chrono::offset::Utc;
 use mongodb::bson::{doc, document::Document};
 //use mongodb::{options::ClientOptions, options::FindOptions, Client, Collection};
-use mongodb::{options::ClientOptions, options::FindOneOptions,  options::FindOptions, options::InsertManyOptions, Client, Cursor};
+use mongodb::{options::ClientOptions, options::FindOneOptions, options::FindOptions, options::InsertManyOptions, options::ReadConcern, Client, Cursor};
 //use serde::{Deserialize, Serialize};
 use futures::StreamExt;
 use clap::ArgMatches;
@@ -24,6 +24,7 @@ impl DB {
     pub async fn init(url: &str, db: &str) -> BoxResult<Self> {
         let mut client_options = ClientOptions::parse(url).await?;
         client_options.app_name = Some("mongodb-stream-rs".to_string());
+        client_options.read_concern = Some(ReadConcern::local());
         Ok(Self {
             client: Client::with_options(client_options)?,
             db: db.to_owned()
@@ -147,6 +148,7 @@ impl DB {
                 }
             };
         }
+        log::info!("{}.{}: Injected {} docs", self.db, collection, counter.count());
         log::info!("{}.{}: Closing cursor", self.db, collection);
         Ok(())
     }
@@ -188,7 +190,7 @@ impl DB {
         Ok(())
     }
 
-    pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize, continue_upload: bool) -> BoxResult<()> {
+    pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize, continue_upload: bool, verbose: bool) -> BoxResult<()> {
         // Get handle on collection
         let coll = self.client.database(&self.db).collection(collection);
 
@@ -260,7 +262,11 @@ impl DB {
                                     log::debug!("Bulk inserted {} docs", bulk_count);
                                 }
                                 Err(e) => {
-                                    log::error!("Got error with insertMany: {}", e);
+                                    if verbose {
+                                        log::error!("Got error with insertMany: {}", e);
+                                    } else {
+                                        log::debug!("Got error with insertMany: {}", e);
+                                    }
                                 }
                             }
                         }));
@@ -300,16 +306,20 @@ impl DB {
                     log::debug!("Bulk inserted {} docs", bulk_len);
                 }
                 Err(e) => {
-                    log::error!("Got error with insertMany: {}", e);
+                    if verbose {
+                        log::error!("Got error with insertMany: {}", e);
+                    } else {
+                        log::debug!("Got error with insertMany: {}", e);
+                    }
                 }
             };
             counter.incr(&self.db, collection, *bulk_len as f64, start);
         };
 
         // Wait for all handles to complete
-//        log::info!("{}.{}: Waiting for all threads to close", self.db, collection);
-//        futures::future::join_all(handles).await;
-//        log::info!("{}.{}: Injected {} docs", self.db, collection, counter.count());
+        log::info!("{}.{}: Waiting for all threads to close", self.db, collection);
+        futures::future::join_all(handles).await;
+        log::info!("{}.{}: Injected {} docs", self.db, collection, counter.count());
 
         log::info!("{}.{}: Closing cursor", self.db, collection);
         Ok(())
@@ -426,7 +436,7 @@ pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatche
         false => {
             // Acquire cursor from source
             let (source_cursor,counter) = source_db.find(&collection, Some(bulk_size as u64), newest_doc).await?;
-            destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize, opts.is_present("continue")).await?;
+            destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize, opts.is_present("continue"), opts.is_present("verbose")).await?;
         }
         true => {
             // Acquire cursor from source

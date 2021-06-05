@@ -108,6 +108,15 @@ async fn main() -> BoxResult<()> {
                 .help("Validate docs in destination")
                 .takes_value(false)
         )
+        .arg(
+            Arg::with_name("verbose")
+                .long("verbose")
+                .required(false)
+                .value_name("STREAM_VERBOSE")
+                .env("STREAM_VERBOSE")
+                .help("Enable extra verbosity")
+                .takes_value(false)
+        )
         .get_matches();
 
     // Initialize log Builder
@@ -161,7 +170,10 @@ async fn main() -> BoxResult<()> {
             log::info!("Transfering {} collections at once", threads);
             Arc::new(Semaphore::new(*threads))
         },
-        false => Arc::new(Semaphore::new(4))
+        false => {
+            log::info!("Transfering 4 collections at once");
+            Arc::new(Semaphore::new(4))
+        }
     };
 
     // Loop over collections and start uploading
