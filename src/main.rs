@@ -117,6 +117,15 @@ async fn main() -> BoxResult<()> {
                 .help("Enable extra verbosity")
                 .takes_value(false)
         )
+        .arg(
+            Arg::with_name("rename")
+                .long("rename")
+                .required(false)
+                .value_name("MONGODB_RENAME")
+                .env("MONGODB_RENAME")
+                .help("Rename DB at destination")
+                .takes_value(true)
+        )
         .get_matches();
 
     // Initialize log Builder
@@ -139,6 +148,7 @@ async fn main() -> BoxResult<()> {
     let source = &opts.value_of("source_uri").unwrap();
     let destination= &opts.value_of("destination_uri").unwrap();
     let db = &opts.value_of("db").unwrap();
+    let renamedb = &opts.value_of("renamedb");
 
     println!(
         "Starting mongodb-stream-rs:{}", 
@@ -146,8 +156,8 @@ async fn main() -> BoxResult<()> {
     );
 
     // Create connections to source and destination db's
-    let source_db = DB::init(&source, &db).await?;
-    let destination_db = DB::init(&destination, &db).await?;
+    let source_db = DB::init(&source, &db, None).await?;
+    let destination_db = DB::init(&destination, &db, *renamedb).await?;
 
 
     let collections = match &opts.is_present("collection") {

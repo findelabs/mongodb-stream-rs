@@ -15,19 +15,21 @@ use tokio::sync::Semaphore;
 #[derive(Clone, Debug)]
 pub struct DB {
     pub client: Client,
-    pub db: String
+    pub db: String,
+    pub renamedb: Option<String>
 }
 
 type BoxResult<T> = std::result::Result<T, Box<dyn error::Error + Send + Sync>>;
 
 impl DB {
-    pub async fn init(url: &str, db: &str) -> BoxResult<Self> {
+    pub async fn init(url: &str, db: &str, renamedb: Option<&str>) -> BoxResult<Self> {
         let mut client_options = ClientOptions::parse(url).await?;
         client_options.app_name = Some("mongodb-stream-rs".to_string());
         client_options.read_concern = Some(ReadConcern::local());
         Ok(Self {
             client: Client::with_options(client_options)?,
-            db: db.to_owned()
+            db: db.to_owned(),
+            renamedb: renamedb.map(|s| s.into())
         })
     }
 
@@ -113,7 +115,7 @@ impl DB {
         };
 
         // Set counter to total
-        counter.total(total);
+        counter.set_total(total);
         
         let cursor = collection_handle.find(query, find_options).await?;
 
@@ -122,7 +124,10 @@ impl DB {
 
     pub async fn insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter) -> BoxResult<()> {
         // Get handle on collection
-        let coll = self.client.database(&self.db).collection(collection);
+        let coll = match &self.renamedb {
+            Some(db) => self.client.database(&db).collection(collection),
+            None => self.client.database(&self.db).collection(collection)
+        };
 
         log::info!("{}.{}: Inserting {} docs", self.db, collection, counter.total);
 
@@ -155,7 +160,10 @@ impl DB {
 
     pub async fn validate_docs(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter) -> BoxResult<()> {
         // Get handle on collection
-        let coll = self.client.database(&self.db).collection(collection);
+        let coll = match &self.renamedb {
+            Some(db) => self.client.database(&db).collection(collection),
+            None => self.client.database(&self.db).collection(collection)
+        };
 
         log::info!("{}.{}: Validating that {} docs in destination exist in source", self.db, collection, counter.total);
 
@@ -386,12 +394,16 @@ impl Counter {
 //        self.count = count as f64;
 //    }
 
-    pub fn total(&mut self, total: f64) {
+    pub fn set_total(&mut self, total: f64) {
         self.total = total;
     }
 
     pub fn count(&self) -> f64 {
         self.count
+    }
+
+    pub fn total(&self) -> f64 {
+        self.total
     }
 
     pub fn incr(&mut self, db: &str, collection: &str, count: f64, start: i64) {
