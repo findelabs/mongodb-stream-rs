@@ -6,7 +6,7 @@ Mongodb-stream-rs is a tool that copies MongoDB databases or single collections 
 
 Once rust has been [installed](https://www.rust-lang.org/tools/install), simply run:
 ```
-cargo install --git https://github.com/findelabs/monogdb-stream-rs.git
+cargo install --git https://github.com/findelabs/mongodb-stream-rs.git
 ```
 
 ### Technical
