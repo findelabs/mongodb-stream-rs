@@ -39,11 +39,17 @@ impl DB {
 
     pub async fn newest(&mut self, collection: &str) -> Option<String> {
 
+        // Get destination db name
+        let db = match &self.renamedb {
+            Some(db) => db,
+            None => &self.db
+        };
+
         // Log which collection this is going into
-        log::info!("{}.{}: Getting newest doc in destination", self.db, collection);
+        log::info!("{}.{}: Getting newest doc in destination", db, collection);
 
         // Get handle on collection
-        let collection_handle = self.client.database(&self.db).collection(collection);
+        let collection_handle = self.client.database(&db).collection(collection);
 
         let options = mongodb::options::FindOneOptions::builder().sort(doc! { "_id": -1 }).projection(doc!{"_id": 1}).build();
 
@@ -53,17 +59,17 @@ impl DB {
                 match result {
                     Some(doc) => {
                         let id = doc.get_object_id("_id").ok()?.to_string();
-                        log::info!("{}.{}: Found newest doc with id: {}", self.db, collection, &id);
+                        log::info!("{}.{}: Found newest doc with id: {}", db, collection, &id);
                         Some(id)
                     },
                     None => {
-                        log::info!("{}.{}: Destination collection is empty", self.db, collection);
+                        log::info!("{}.{}: Destination collection is empty", db, collection);
                         None
                     }
                 }
             },
             Err(e) => {
-                log::info!("{}.{}: Error finding newest doc: {}", self.db, collection, e);
+                log::info!("{}.{}: Error finding newest doc: {}", db, collection, e);
                 None
             }
         }
@@ -123,13 +129,16 @@ impl DB {
     }
 
     pub async fn insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter) -> BoxResult<()> {
-        // Get handle on collection
-        let coll = match &self.renamedb {
-            Some(db) => self.client.database(&db).collection(collection),
-            None => self.client.database(&self.db).collection(collection)
+        // Get destination db name
+        let db = match &self.renamedb {
+            Some(db) => db,
+            None => &self.db
         };
 
-        log::info!("{}.{}: Inserting {} docs", self.db, collection, counter.total);
+        // Get handle on collection
+        let collection_handle = self.client.database(&db).collection(collection);
+
+        log::info!("{}.{}: Inserting {} docs", db, collection, counter.total);
 
         // Get timestamp
         let start = Utc::now().timestamp();
@@ -137,35 +146,38 @@ impl DB {
         while let Some(doc) = cursor.next().await {
             match doc {
                 Ok(doc) => {
-                    match coll.insert_one(doc, None).await {
+                    match collection_handle.insert_one(doc, None).await {
                         Ok(id) => {
-                            log::debug!("{}.{}: Inserted id: {}", self.db, collection, id.inserted_id.to_string());
+                            log::debug!("{}.{}: Inserted id: {}", db, collection, id.inserted_id.to_string());
                         }
                         Err(e) => {
-                            log::debug!("{}.{}: Got error: {}", self.db, collection, e);
+                            log::debug!("{}.{}: Got error: {}", db, collection, e);
                         }
                     }
-                    counter.incr(&self.db, collection, 1.0, start);
+                    counter.incr(&db, collection, 1.0, start);
                 }
                 Err(e) => {
-                    log::error!("{}.{}: Caught error getting next doc: {}", self.db, collection, e);
+                    log::error!("{}.{}: Caught error getting next doc: {}", db, collection, e);
                     continue;
                 }
             };
         }
-        log::info!("{}.{}: Injected {} docs", self.db, collection, counter.count());
-        log::info!("{}.{}: Closing cursor", self.db, collection);
+        log::info!("{}.{}: Injected {} docs", db, collection, counter.count());
+        log::info!("{}.{}: Closing cursor", db, collection);
         Ok(())
     }
 
     pub async fn validate_docs(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter) -> BoxResult<()> {
-        // Get handle on collection
-        let coll = match &self.renamedb {
-            Some(db) => self.client.database(&db).collection(collection),
-            None => self.client.database(&self.db).collection(collection)
+        // Get destination db name
+        let db = match &self.renamedb {
+            Some(db) => db,
+            None => &self.db
         };
 
-        log::info!("{}.{}: Validating that {} docs in destination exist in source", self.db, collection, counter.total);
+        // Get handle on collection
+        let collection_handle = self.client.database(&db).collection(collection);
+
+        log::info!("{}.{}: Validating that {} docs in destination exist in source", db, collection, counter.total);
 
         // Get timestamp
         let start = Utc::now().timestamp();
@@ -178,34 +190,40 @@ impl DB {
             match doc {
                 Ok(doc) => {
                     let id = doc.get_object_id("_id")?;
-                    match coll.find_one(doc!{ "_id": id }, find_one_options.clone()).await {
+                    match collection_handle.find_one(doc!{ "_id": id }, find_one_options.clone()).await {
                         Ok(_id) => {
-                            log::debug!("{}.{}: Found {} in source collection", self.db, collection, id);
+                            log::debug!("{}.{}: Found {} in source collection", db, collection, id);
                         }
                         Err(e) => {
-                            log::error!("{}.{}: Got error finding {}: {}", self.db, collection, id, e);
+                            log::error!("{}.{}: Got error finding {}: {}", db, collection, id, e);
                         }
                     }
-                    counter.incr(&self.db, collection, 1.0, start);
+                    counter.incr(&db, collection, 1.0, start);
                 }
                 Err(e) => {
-                    log::error!("{}.{}: Caught error getting next doc: {}", self.db, collection, e);
+                    log::error!("{}.{}: Caught error getting next doc: {}", db, collection, e);
                     continue;
                 }
             };
         }
-        log::info!("{}.{}: Completed validation, closing cursor", self.db, collection);
+        log::info!("{}.{}: Completed validation, closing cursor", db, collection);
         Ok(())
     }
 
     pub async fn bulk_insert_cursor(&mut self, collection: &str, mut cursor: Cursor, mut counter: Counter, bulk_count: usize, continue_upload: bool, verbose: bool) -> BoxResult<()> {
+        // Get destination db name
+        let db = match &self.renamedb {
+            Some(db) => db,
+            None => &self.db
+        };
+
         // Get handle on collection
-        let coll = self.client.database(&self.db).collection(collection);
+        let collection_handle = self.client.database(&db).collection(collection);
 
         if counter.total != 0.0 {
-            log::info!("{}.{}: Bulk inserting {} docs in batches of {}", self.db, collection, counter.total, bulk_count);
+            log::info!("{}.{}: Bulk inserting {} docs in batches of {}", db, collection, counter.total, bulk_count);
         } else {
-            log::info!("{}.{}: There are {} docs to upload", self.db, collection, counter.total);
+            log::info!("{}.{}: There are {} docs to upload", db, collection, counter.total);
         };
 
         let insert_many_options = match continue_upload {
@@ -247,7 +265,7 @@ impl DB {
                     // Push to vec, incr counter, and print debug log
                     bulk.push(d);
                     count += 1;
-                    log::debug!("{}.{}: inserted doc: {}/{}", self.db, collection, count, bulk_count);
+                    log::debug!("{}.{}: inserted doc: {}/{}", db, collection, count, bulk_count);
 
                     // If counter is greater or equal to bulk_count
                     if count >= bulk_count {
@@ -257,7 +275,7 @@ impl DB {
                         mem::swap(&mut bulk, &mut tmp_bulk);
                     
                         // Get clones for the threads
-                        let coll_clone = coll.clone();
+                        let coll_clone = collection_handle.clone();
                         let options = insert_many_options.clone();
 
                         // Get permission to kick off task
@@ -280,7 +298,7 @@ impl DB {
                         }));
 //                            };
 
-                        counter.incr(&self.db, collection, count as f64, start);
+                        counter.incr(&db, collection, count as f64, start);
 
                         // DEBUG
  //                       let current_total = self.count(collection).await.expect("expect failed");
@@ -296,7 +314,7 @@ impl DB {
                     }
                 }
                 Err(e) => {
-                    log::error!("{}.{} Caught error getting next doc: {}", self.db, collection, e);
+                    log::error!("{}.{} Caught error getting next doc: {}", db, collection, e);
                     continue;
                 }
             }
@@ -309,7 +327,7 @@ impl DB {
         // Push any remaining docs to destination
         let bulk_len = &bulk.len();
         if bulk_len > &0 {
-            match coll.insert_many(bulk, insert_many_options).await {
+            match collection_handle.insert_many(bulk, insert_many_options).await {
                 Ok(_) => {
                     log::debug!("Bulk inserted {} docs", bulk_len);
                 }
@@ -321,15 +339,15 @@ impl DB {
                     }
                 }
             };
-            counter.incr(&self.db, collection, *bulk_len as f64, start);
+            counter.incr(&db, collection, *bulk_len as f64, start);
         };
 
         // Wait for all handles to complete
-        log::info!("{}.{}: Waiting for all threads to close", self.db, collection);
+        log::info!("{}.{}: Waiting for all threads to close", db, collection);
         futures::future::join_all(handles).await;
-        log::info!("{}.{}: Injected {} docs", self.db, collection, counter.count());
+        log::info!("{}.{}: Injected {} docs", db, collection, counter.count());
 
-        log::info!("{}.{}: Closing cursor", self.db, collection);
+        log::info!("{}.{}: Closing cursor", db, collection);
         Ok(())
     }
 

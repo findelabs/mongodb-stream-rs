@@ -148,7 +148,7 @@ async fn main() -> BoxResult<()> {
     let source = &opts.value_of("source_uri").unwrap();
     let destination= &opts.value_of("destination_uri").unwrap();
     let db = &opts.value_of("db").unwrap();
-    let renamedb = &opts.value_of("renamedb");
+    let renamedb = &opts.value_of("rename");
 
     println!(
         "Starting mongodb-stream-rs:{}", 
