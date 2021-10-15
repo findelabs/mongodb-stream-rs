@@ -26,8 +26,19 @@ impl DB {
         let mut client_options = ClientOptions::parse(url).await?;
         client_options.app_name = Some("mongodb-stream-rs".to_string());
         client_options.read_concern = Some(ReadConcern::local());
+
+        let client = Client::with_options(client_options.clone())?;
+
+        match client.list_database_names(None, None).await {
+            Ok(_) => log::info!("Successfully connected to {}", client_options.repl_set_name.unwrap_or_else(|| url.to_string())),
+            Err(e) => {
+                log::error!("Error connecting to {}: {}", client_options.repl_set_name.unwrap_or_else(|| url.to_string()), e);
+                std::process::exit(1);
+            }
+        };
+
         Ok(Self {
-            client: Client::with_options(client_options)?,
+            client, 
             db: db.to_owned(),
             renamedb: renamedb.map(|s| s.into())
         })
@@ -256,7 +267,7 @@ impl DB {
         let mut handles = vec![];
 
         // Let's rate limit to just 4 uploads at once
-        let sem = Arc::new(Semaphore::new(1));
+        let sem = Arc::new(Semaphore::new(4));
 
         // Good article about memory swapping: https://stackoverflow.com/questions/50970102/is-there-a-way-to-fill-up-a-vector-for-bulk-inserts-with-the-mongodb-driver-and
         while let Some(doc) = cursor.next().await {
@@ -448,30 +459,36 @@ impl Counter {
     }
 }
 
-pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatches<'_>, collection: String) -> BoxResult<()> {
+pub async fn transfer(mut source_db: DB, mut destination_db: DB, opts: ArgMatches<'_>, source_collection: String, rename_coll: Option<String>) -> BoxResult<()> {
 
     let bulk_size = match opts.is_present("bulk") {
         true => opts.value_of("bulk").unwrap().parse::<u32>()?,
         false => 2000u32
     };
 
-    // If --continue is set, find newest doc
-    let newest_doc = match opts.is_present("continue") {
-        true => destination_db.newest(&collection).await,
-        false => None
+    // If renamecoll is Some
+    let destination_collection = match rename_coll {
+        Some(c) => c,
+        None => source_collection.clone()
     };
     
+    // If --continue is set, find newest doc
+    let newest_doc = match opts.is_present("continue") {
+        true => destination_db.newest(&destination_collection).await,
+        false => None
+    };
+
     // If bulk flag is set, use insertMany
     match opts.is_present("nobulk") {
         false => {
             // Acquire cursor from source
-            let (source_cursor,counter) = source_db.find(&collection, Some(bulk_size as u64), newest_doc).await?;
-            destination_db.bulk_insert_cursor(&collection, source_cursor, counter, bulk_size as usize, opts.is_present("continue"), opts.is_present("verbose")).await?;
+            let (source_cursor,counter) = source_db.find(&source_collection, Some(bulk_size as u64), newest_doc).await?;
+            destination_db.bulk_insert_cursor(&destination_collection, source_cursor, counter, bulk_size as usize, opts.is_present("continue"), opts.is_present("verbose")).await?;
         }
         true => {
             // Acquire cursor from source
-            let (source_cursor,counter) = source_db.find(&collection, None, newest_doc).await?;
-            destination_db.insert_cursor(&collection, source_cursor, counter).await?
+            let (source_cursor,counter) = source_db.find(&source_collection, None, newest_doc).await?;
+            destination_db.insert_cursor(&destination_collection, source_cursor, counter).await?
         }   
     };
 

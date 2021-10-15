@@ -20,20 +20,20 @@ async fn main() -> BoxResult<()> {
         .author("Daniel F. <dan@findelabs.com>")
         .about("Stream MongoDB to MongoDB")
         .arg(
-            Arg::with_name("source_uri")
-                .long("source_uri")
+            Arg::with_name("source")
+                .long("source")
                 .required(true)
-                .value_name("STREAM_SOURCE")
-                .env("STREAM_SOURCE")
+                .value_name("SOURCE")
+                .env("SOURCE")
                 .help("Source MongoDB URI")
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("destination_uri")
-                .long("destination_uri")
+            Arg::with_name("destination")
+                .long("destination")
                 .required(true)
-                .value_name("STREAM_DEST")
-                .env("STREAM_DEST")
+                .value_name("DESTINATION")
+                .env("DESTINATION")
                 .help("Destination MongoDB URI")
                 .takes_value(true),
         )
@@ -118,12 +118,21 @@ async fn main() -> BoxResult<()> {
                 .takes_value(false)
         )
         .arg(
-            Arg::with_name("rename")
-                .long("rename")
+            Arg::with_name("rename_db")
+                .long("rename_db")
                 .required(false)
-                .value_name("MONGODB_RENAME")
-                .env("MONGODB_RENAME")
-                .help("Rename DB at destination")
+                .value_name("MONGODB_RENAMEDB")
+                .env("MONGODB_RENAMEDB")
+                .help("Rename database at destination")
+                .takes_value(true)
+        )
+        .arg(
+            Arg::with_name("rename_coll")
+                .long("rename_coll")
+                .required(false)
+                .value_name("MONGODB_RENAMECOLL")
+                .env("MONGODB_RENAMECOLL")
+                .help("Rename collection at destination")
                 .takes_value(true)
         )
         .get_matches();
@@ -145,10 +154,10 @@ async fn main() -> BoxResult<()> {
         .init();
 
     // Create vars for required variables
-    let source = &opts.value_of("source_uri").unwrap();
-    let destination= &opts.value_of("destination_uri").unwrap();
+    let source = &opts.value_of("source").unwrap();
+    let destination = &opts.value_of("destination").unwrap();
     let db = &opts.value_of("db").unwrap();
-    let renamedb = &opts.value_of("rename");
+    let renamedb = &opts.value_of("rename_db");
 
     println!(
         "Starting mongodb-stream-rs:{}", 
@@ -159,7 +168,7 @@ async fn main() -> BoxResult<()> {
     let source_db = DB::init(&source, &db, None).await?;
     let destination_db = DB::init(&destination, &db, *renamedb).await?;
 
-
+    // Collect all collections into array
     let collections = match &opts.is_present("collection") {
         true => {
             let mut vec: Vec<String> = Vec::new();
@@ -169,6 +178,20 @@ async fn main() -> BoxResult<()> {
         },
         false => source_db.collections().await?
     };
+
+    let rename_coll = match opts.is_present("rename_coll") {
+        true => {
+            if collections.len() > 1 {
+                log::error!("Cannot rename a collection when multiple collections are found");
+                std::process::exit(1);
+            } else {
+                let x = opts.value_of("rename_coll").unwrap().to_string();
+                Some(x)
+            }
+        },
+        _ => None
+    };
+            
 
     // Create vector for handles
     let mut handles = vec![];
@@ -181,8 +204,12 @@ async fn main() -> BoxResult<()> {
             Arc::new(Semaphore::new(*threads))
         },
         false => {
-            log::info!("Transfering 4 collections at once");
-            Arc::new(Semaphore::new(4))
+            if opts.is_present("rename_coll") {
+                Arc::new(Semaphore::new(1))
+            } else {
+                log::info!("Transfering 4 collections at once");
+                Arc::new(Semaphore::new(4))
+            }
         }
     };
 
@@ -192,13 +219,14 @@ async fn main() -> BoxResult<()> {
         let source = source_db.clone();
         let destination = destination_db.clone();
         let opts = opts.clone();
+        let rename_coll = rename_coll.clone();
 
         // Get permission to kick off task
         let permit = Arc::clone(&sem).acquire_owned().await;
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            match transfer(source.clone(), destination.clone(), opts.clone(), collection.clone()).await {
+            match transfer(source.clone(), destination.clone(), opts.clone(), collection.clone(), rename_coll).await {
                 Ok(_) => {
                     // Check docs
                     if opts.is_present("validate") {
